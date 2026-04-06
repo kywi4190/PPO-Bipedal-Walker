@@ -169,19 +169,34 @@ class RolloutBuffer:
         # returns = advantages + values (used as the target for the critic)
         self.returns = self.advantages + values
 
-    def get_batches(self, batch_size):
+    def get_batches(self, batch_size, device=None):
         """
         Yield random minibatches of the stored rollout as PyTorch tensors.
         Shuffling is important — without it the optimizer would see correlated
         sequences, which hurts learning.
         """
         n = len(self.rewards)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # convert everything to numpy arrays for easy slicing
-        observations = np.array(self.observations)
-        actions = np.array(self.actions)
-        log_probs = np.array(self.log_probs)
+        # bulk-convert everything to device tensors once up front,
+        # then slice into minibatches on-device (avoids many small
+        # CPU→GPU transfers when training on a GPU)
+        all_obs = torch.tensor(
+            np.array(self.observations), dtype=torch.float32, device=device
+        )
+        all_actions = torch.tensor(
+            np.array(self.actions), dtype=torch.float32, device=device
+        )
+        all_log_probs = torch.tensor(
+            np.array(self.log_probs), dtype=torch.float32, device=device
+        )
+        all_advantages = torch.tensor(
+            self.advantages, dtype=torch.float32, device=device
+        )
+        all_returns = torch.tensor(
+            self.returns, dtype=torch.float32, device=device
+        )
 
         # shuffle the indices
         indices = np.arange(n)
@@ -193,21 +208,11 @@ class RolloutBuffer:
             batch_idx = indices[start:end]
 
             yield {
-                "observations": torch.tensor(
-                    observations[batch_idx], dtype=torch.float32, device=device
-                ),
-                "actions": torch.tensor(
-                    actions[batch_idx], dtype=torch.float32, device=device
-                ),
-                "old_log_probs": torch.tensor(
-                    log_probs[batch_idx], dtype=torch.float32, device=device
-                ),
-                "advantages": torch.tensor(
-                    self.advantages[batch_idx], dtype=torch.float32, device=device
-                ),
-                "returns": torch.tensor(
-                    self.returns[batch_idx], dtype=torch.float32, device=device
-                ),
+                "observations": all_obs[batch_idx],
+                "actions": all_actions[batch_idx],
+                "old_log_probs": all_log_probs[batch_idx],
+                "advantages": all_advantages[batch_idx],
+                "returns": all_returns[batch_idx],
             }
 
     def clear(self):
@@ -254,7 +259,7 @@ def ppo_update(agent, optimizer, buffer, config=CONFIG, last_obs=None):
     # action), so the caller passes the correct next-state instead.
     if last_obs is None:
         last_obs = buffer.observations[-1]
-    with torch.no_grad():
+    with torch.inference_mode():
         last_value = agent.critic(
             torch.tensor(last_obs, dtype=torch.float32, device=device)
         ).item()
@@ -270,7 +275,7 @@ def ppo_update(agent, optimizer, buffer, config=CONFIG, last_obs=None):
     num_updates = 0
 
     for _epoch in range(num_epochs):
-        for batch in buffer.get_batches(minibatch_size):
+        for batch in buffer.get_batches(minibatch_size, device=device):
             obs = batch["observations"]
             actions = batch["actions"]
             old_log_probs = batch["old_log_probs"]
@@ -324,7 +329,7 @@ def ppo_update(agent, optimizer, buffer, config=CONFIG, last_obs=None):
             # this isn't used in the loss, but it's a great diagnostic —
             # if KL spikes, the policy changed too much and you might want
             # to lower the learning rate or increase clipping.
-            with torch.no_grad():
+            with torch.inference_mode():
                 approx_kl = ((ratio - 1.0) - ratio.log()).mean().item()
 
             total_policy_loss += policy_loss.item()

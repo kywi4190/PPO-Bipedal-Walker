@@ -100,6 +100,10 @@ def train(config):
     print("=" * 60)
     print(f"  Profile:             {config.get('profile', 'custom')}")
     print(f"  Device:              {device}")
+    if device.type == "cuda":
+        print(f"  GPU:                 {torch.cuda.get_device_name(0)}")
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"  GPU memory:          {gpu_mem:.1f} GB")
     print(f"  Observation size:    {env.observation_size}")
     print(f"  Action size:         {env.action_size}")
     print(f"  Hidden size:         {config['hidden_size']}")
@@ -176,7 +180,7 @@ def train(config):
 
                 # ask the policy what to do -- no_grad because we're just
                 # collecting data here, not computing gradients
-                with torch.no_grad():
+                with torch.inference_mode():
                     action, log_prob, value = agent.get_action(obs_tensor)
 
                 # environment wants numpy actions, not tensors
