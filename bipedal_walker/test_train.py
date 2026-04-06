@@ -1,7 +1,7 @@
 from config import CONFIG
 
 # Quick test with very few steps
-CONFIG['total_training_timesteps'] = 4096
+CONFIG['total_timesteps'] = 4096
 CONFIG['rollout_steps'] = 512
 CONFIG['log_interval'] = 1
 

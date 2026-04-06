@@ -36,6 +36,7 @@ GRID_COLOR = (70, 110, 60)          # tick marks
 TORSO_COLOR = (70, 100, 160)        # muted blue
 THIGH_COLOR = (90, 130, 180)        # slightly lighter
 SHIN_COLOR = (110, 150, 200)        # lighter still
+FOOT_COLOR = (130, 170, 220)        # lightest blue (lighter than shin)
 JOINT_COLOR = (220, 200, 60)        # yellow-ish dots
 
 HUD_BG_COLOR = (0, 0, 0, 140)      # semi-transparent black
@@ -64,10 +65,13 @@ def draw_body_parts(screen, body_positions, camera_x, screen_w):
         "right_thigh": THIGH_COLOR,
         "left_shin": SHIN_COLOR,
         "right_shin": SHIN_COLOR,
+        "left_foot": FOOT_COLOR,
+        "right_foot": FOOT_COLOR,
     }
 
     # draw back-to-front so torso is on top
     draw_order = [
+        "left_foot", "right_foot",
         "left_shin", "right_shin",
         "left_thigh", "right_thigh",
         "torso",
@@ -92,6 +96,19 @@ def draw_body_parts(screen, body_positions, camera_x, screen_w):
         v = body_positions[name]["vertices"]
         jx = (v[0][0] + v[1][0]) / 2
         jy = (v[0][1] + v[1][1]) / 2
+        sx, sy = world_to_screen(jx, jy, camera_x, screen_w)
+        pygame.draw.circle(screen, JOINT_COLOR, (sx, sy), 4)
+        pygame.draw.circle(screen, (40, 40, 40), (sx, sy), 4, 1)
+
+    # ankle joint circles at the bottom edge of each shin.
+    # in the vertex order [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)],
+    # indices 2 and 3 are the bottom edge (connects to foot via ankle).
+    for name in ["left_shin", "right_shin"]:
+        if name not in body_positions:
+            continue
+        v = body_positions[name]["vertices"]
+        jx = (v[2][0] + v[3][0]) / 2
+        jy = (v[2][1] + v[3][1]) / 2
         sx, sy = world_to_screen(jx, jy, camera_x, screen_w)
         pygame.draw.circle(screen, JOINT_COLOR, (sx, sy), 4)
         pygame.draw.circle(screen, (40, 40, 40), (sx, sy), 4, 1)
@@ -173,16 +190,22 @@ def run_visualization(model_path=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if model_path:
+        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            hidden_size = checkpoint["hidden_size"]
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            # backward compat: old checkpoints are bare state_dicts
+            hidden_size = CONFIG["hidden_size"]
+            state_dict = checkpoint
         agent = ActorCritic(
             env.observation_size, env.action_size,
-            hidden_size=CONFIG["hidden_size"],
+            hidden_size=hidden_size,
         ).to(device)
-        agent.load_state_dict(
-            torch.load(model_path, map_location=device, weights_only=True)
-        )
+        agent.load_state_dict(state_dict)
         agent.eval()
         using_model = True
-        print(f"Loaded model from: {model_path}")
+        print(f"Loaded model from: {model_path} (hidden_size={hidden_size})")
     else:
         print("No model specified -- using random actions")
 

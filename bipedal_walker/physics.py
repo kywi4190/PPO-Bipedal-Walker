@@ -1,9 +1,9 @@
 """
 physics.py - Core 2D physics simulation using pymunk.
 
-This file builds a 5-segment ragdoll (torso + 2 thighs + 2 shins) in a
-pymunk physics space and lets an RL agent control 4 joint motors to make
-it walk.  The coordinate system matches pygame's screen coords: +x is
+This file builds a 7-segment ragdoll (torso + 2 thighs + 2 shins + 2 feet)
+in a pymunk physics space and lets an RL agent control 6 joint motors to
+make it walk.  The coordinate system matches pygame's screen coords: +x is
 right, +y is DOWN, so gravity = (0, +980) pulls things downward.
 
 Classes:
@@ -23,21 +23,32 @@ from config import CONFIG
 # joint movement and the motor's max_force caps the actual torque.
 MAX_MOTOR_RATE = 10.0
 
+# normalize observations so all components land roughly in [-1, 1].
+# velocities are ~hundreds px/s, height is ~150px, angles are ~1 rad —
+# without scaling, the network struggles with the mixed magnitudes.
+_VEL_SCALE = 300.0       # linear velocity normalization
+_HEIGHT_SCALE = 200.0     # height normalization
+_ANG_VEL_SCALE = 10.0     # angular velocity normalization
+
 
 # ── ragdoll ────────────────────────────────────────────────────────────
 
 class RagdollBody:
     """
-    A 5-segment bipedal ragdoll: torso, left thigh, left shin,
-    right thigh, right shin.  Four motorized joints (2 hips + 2 knees)
-    connect the segments.
+    A 7-segment bipedal ragdoll: torso, left thigh, left shin, left foot,
+    right thigh, right shin, right foot.  Six motorized joints
+    (2 hips + 2 knees + 2 ankles) connect the segments.
 
-    The observation space is 13 floats (see get_state for the layout).
-    The action space is 4 floats in [-1, 1], one per motor.
+    The observation space is 19 floats (see get_state for the layout).
+    The action space is 6 floats in [-1, 1], one per motor.
     """
 
-    # names of the 4 motors, in the order the agent's action vector uses
-    MOTOR_NAMES = ["left_hip", "right_hip", "left_knee", "right_knee"]
+    # names of the 6 motors, in the order the agent's action vector uses
+    MOTOR_NAMES = [
+        "left_hip", "right_hip",
+        "left_knee", "right_knee",
+        "left_ankle", "right_ankle",
+    ]
 
     def __init__(self, space, config):
         self.space = space
@@ -93,7 +104,12 @@ class RagdollBody:
 
         # motor lets the agent drive the joint (starts at rate=0, i.e. off)
         motor = pymunk.SimpleMotor(body_a, body_b, 0.0)
-        motor.max_force = self.config["motor_max_force"]
+        if "hip" in name:
+            motor.max_force = self.config["hip_motor_force"]
+        elif "knee" in name:
+            motor.max_force = self.config["knee_motor_force"]
+        else:
+            motor.max_force = self.config["ankle_motor_force"]
 
         self.space.add(pivot, limit, motor)
         self.joints.extend([pivot, limit, motor])
@@ -152,6 +168,27 @@ class RagdollBody:
             (right_knee_world[0], right_knee_world[1] + ll / 2),
         )
 
+        # ---- feet ----
+        fw = c["foot_width"]
+        fh = c["foot_height"]
+
+        # ankle world position = bottom of shin
+        left_ankle_world = (left_knee_world[0], left_knee_world[1] + ll)
+        right_ankle_world = (right_knee_world[0], right_knee_world[1] + ll)
+
+        # foot center: ankle pivot sits on the foot's top edge, aligned so
+        # the shin's left side is flush with the foot's left side.
+        # shin left = ankle_x - lw/2, foot left = foot_cx - fw/2
+        # flush => foot_cx = ankle_x + (fw - lw) / 2
+        self._make_box_segment(
+            "left_foot", c["foot_mass"], fw, fh,
+            (left_ankle_world[0] + (fw - lw) / 2, left_ankle_world[1] + fh / 2),
+        )
+        self._make_box_segment(
+            "right_foot", c["foot_mass"], fw, fh,
+            (right_ankle_world[0] + (fw - lw) / 2, right_ankle_world[1] + fh / 2),
+        )
+
         # ---- joints ----
         # anchor coords are in each body's LOCAL frame
         torso_body = self.bodies["torso"]
@@ -192,26 +229,65 @@ class RagdollBody:
             c["knee_min_angle"], c["knee_max_angle"],
         )
 
+        # ankle joints: shin center-bottom -> foot top edge (left-aligned)
+        shin_bottom = (0, ll / 2)
+        # foot anchor in local coords: top edge, offset so shin left = foot left
+        foot_ankle = (lw / 2 - fw / 2, -fh / 2)
+
+        # left ankle
+        self._make_joint(
+            "left_ankle", self.bodies["left_shin"], self.bodies["left_foot"],
+            shin_bottom, foot_ankle,
+            c["ankle_min_angle"], c["ankle_max_angle"],
+        )
+        # right ankle
+        self._make_joint(
+            "right_ankle", self.bodies["right_shin"], self.bodies["right_foot"],
+            shin_bottom, foot_ankle,
+            c["ankle_min_angle"], c["ankle_max_angle"],
+        )
+
     # ── public API ─────────────────────────────────────────────────────
+
+    def get_foot_contacts(self):
+        """Return dict of foot name -> bool for ground contact."""
+        ground_y = self.config["ground_y"]
+        margin = 8  # pixels above ground_y to count as contact
+        contacts = {}
+        for name in ("left_foot", "right_foot"):
+            body = self.bodies[name]
+            in_contact = False
+            for v in self.shapes[name].get_vertices():
+                if body.local_to_world(v).y >= ground_y - margin:
+                    in_contact = True
+                    break
+            contacts[name] = in_contact
+        return contacts
 
     def get_state(self):
         """
         Build the observation vector for the RL agent.
 
-        Returns a numpy array of 13 floats:
-            [ 0] torso x-velocity           (px/s)
-            [ 1] torso y-velocity           (px/s)
-            [ 2] torso angle                (rad, 0 = upright)
-            [ 3] torso angular velocity     (rad/s)
-            [ 4] torso height above ground  (px, positive = above)
+        Returns a numpy array of 19 floats:
+            [ 0] torso x-velocity           (normalized)
+            [ 1] torso y-velocity           (normalized)
+            [ 2] torso angle                (rad)
+            [ 3] torso angular velocity     (normalized)
+            [ 4] torso height above ground  (normalized)
             [ 5] left hip  relative angle   (rad)
-            [ 6] left hip  angular velocity (rad/s)
+            [ 6] left hip  angular velocity (normalized)
             [ 7] right hip relative angle   (rad)
-            [ 8] right hip angular velocity (rad/s)
+            [ 8] right hip angular velocity (normalized)
             [ 9] left knee  relative angle  (rad)
-            [10] left knee  angular velocity(rad/s)
+            [10] left knee  angular velocity(normalized)
             [11] right knee relative angle  (rad)
-            [12] right knee angular velocity(rad/s)
+            [12] right knee angular velocity(normalized)
+            [13] left ankle  relative angle (rad)
+            [14] left ankle  angular velocity(normalized)
+            [15] right ankle relative angle (rad)
+            [16] right ankle angular velocity(normalized)
+            [17] left foot ground contact   (0.0 or 1.0)
+            [18] right foot ground contact  (0.0 or 1.0)
         """
         torso = self.bodies["torso"]
 
@@ -220,11 +296,11 @@ class RagdollBody:
         height = self.config["ground_y"] - torso.position.y
 
         state = [
-            torso.velocity.x,
-            torso.velocity.y,
+            torso.velocity.x / _VEL_SCALE,
+            torso.velocity.y / _VEL_SCALE,
             torso.angle,
-            torso.angular_velocity,
-            height,
+            torso.angular_velocity / _ANG_VEL_SCALE,
+            height / _HEIGHT_SCALE,
         ]
 
         # relative angle & angular velocity for each joint
@@ -233,46 +309,43 @@ class RagdollBody:
             motor = self.motors[name]
             parent, child = motor.a, motor.b
             rel_angle = child.angle - parent.angle
-            rel_ang_vel = child.angular_velocity - parent.angular_velocity
+            rel_ang_vel = (child.angular_velocity - parent.angular_velocity) / _ANG_VEL_SCALE
             state.append(rel_angle)
             state.append(rel_ang_vel)
+
+        # foot ground contact signals
+        contacts = self.get_foot_contacts()
+        state.append(1.0 if contacts["left_foot"] else 0.0)
+        state.append(1.0 if contacts["right_foot"] else 0.0)
 
         return np.array(state, dtype=np.float32)
 
     def apply_actions(self, actions):
         """
-        Set the 4 motor rates from the agent's action vector.
+        Set the 6 motor rates from the agent's action vector.
 
-        `actions` is a length-4 array with values in [-1, 1].
-        Order: left_hip, right_hip, left_knee, right_knee.
+        `actions` is a length-6 array with values in [-1, 1].
+        Order: left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle.
         """
         for i, name in enumerate(self.MOTOR_NAMES):
             self.motors[name].rate = float(actions[i]) * MAX_MOTOR_RATE
 
-    def get_joint_torques(self):
-        """
-        Sum of squared motor rates -- a rough proxy for how much energy
-        the agent is burning.  Used in the reward function's energy penalty.
-        """
-        return sum(m.rate ** 2 for m in self.motors.values())
-
     def is_fallen(self):
         """
-        The ragdoll counts as "fallen" if:
-          - the torso is tilted more than ~60° from vertical
-          - the torso is too close to the ground (< 30% of torso height)
+        The ragdoll has fallen if any non-foot body part touches the
+        ground (any vertex near or below ground_y).
+
+        Uses a 2px margin matching the ground segment's collision radius.
+        The old 5px margin caused false positives: when feet support the
+        body, shin-bottom vertices sit ~10px above ground, but joint flex
+        under load could push them into the 5px zone.
         """
-        torso = self.bodies["torso"]
-
-        # too tilted?
-        if abs(torso.angle) > math.pi / 3:
-            return True
-
-        # torso center too close to (or past) the ground?
-        height_above_ground = self.config["ground_y"] - torso.position.y
-        if height_above_ground < self.config["torso_height"] * 0.3:
-            return True
-
+        fall_y = self.config["ground_y"] - 2
+        for name in ("torso", "left_thigh", "right_thigh", "left_shin", "right_shin"):
+            body = self.bodies[name]
+            for v in self.shapes[name].get_vertices():
+                if body.local_to_world(v).y >= fall_y:
+                    return True
         return False
 
     def get_torso_x(self):
@@ -346,7 +419,7 @@ class PhysicsWorld:
         """
         Return a dict of body-part rendering data for the renderer.
 
-        Keys: 'torso', 'left_thigh', 'left_shin', 'right_thigh', 'right_shin'
+        Keys: 'torso', 'left_thigh', 'left_shin', 'left_foot', 'right_thigh', 'right_shin', 'right_foot'
         Each value is a dict with:
             'position'  -- (x, y) center of the body in world coords
             'angle'     -- rotation in radians

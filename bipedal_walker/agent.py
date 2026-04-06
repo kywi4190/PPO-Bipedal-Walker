@@ -32,15 +32,20 @@ class ActorCritic(nn.Module):
     def __init__(self, obs_size, action_size, hidden_size=CONFIG["hidden_size"]):
         super().__init__()
 
-        # -- actor network: obs -> action mean --
-        self.actor = nn.Sequential(
+        # -- actor backbone: shared feature extraction --
+        self.actor_backbone = nn.Sequential(
             nn.Linear(obs_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
+        )
+
+        # -- actor heads: action mean + state-dependent log_std --
+        self.action_mean = nn.Sequential(
             nn.Linear(hidden_size, action_size),
             nn.Tanh(),  # squash action means to [-1, 1]
         )
+        self.action_log_std = nn.Linear(hidden_size, action_size)
 
         # -- critic network: obs -> single value --
         self.critic = nn.Sequential(
@@ -51,18 +56,14 @@ class ActorCritic(nn.Module):
             nn.Linear(hidden_size, 1),
         )
 
-        # learnable log standard deviation — one scalar per action dimension.
-        # starts at 0 => std = exp(0) = 1, which gives decent exploration
-        # at the beginning. the network will shrink this as it gets more
-        # confident about what actions to take.
-        self.log_std = nn.Parameter(torch.zeros(action_size))
-
     # -- helper to build the gaussian distribution for the current policy --
     def _get_dist(self, obs):
         """Returns a Normal distribution over actions for the given obs."""
-        action_mean = self.actor(obs)
-        # exp(log_std) = std, guaranteed positive
-        action_std = self.log_std.exp()
+        features = self.actor_backbone(obs)
+        action_mean = self.action_mean(features)
+        log_std = self.action_log_std(features)
+        log_std = torch.clamp(log_std, -2.0, 0.5)  # std in [0.135, 1.649]
+        action_std = log_std.exp()
         return Normal(action_mean, action_std)
 
     def get_action(self, obs):
@@ -223,7 +224,7 @@ class RolloutBuffer:
 
 # ── PPO Update ────────────────────────────────────────────────────────────────
 
-def ppo_update(agent, optimizer, buffer, config=CONFIG):
+def ppo_update(agent, optimizer, buffer, config=CONFIG, last_obs=None):
     """
     The main PPO-Clip update. Takes a full rollout buffer and does several
     epochs of minibatch gradient descent on it.
@@ -232,6 +233,9 @@ def ppo_update(agent, optimizer, buffer, config=CONFIG):
     data, but if we change the policy too much, the data becomes "stale" and
     training goes off the rails. The clipping mechanism prevents this by
     capping how much the probability ratio can change.
+
+    last_obs: the observation AFTER the last action in the rollout (s_{T+1}),
+              needed to bootstrap GAE. Must be provided by the caller.
 
     Returns a dict of loss statistics for logging/debugging.
     """
@@ -243,9 +247,13 @@ def ppo_update(agent, optimizer, buffer, config=CONFIG):
     minibatch_size = config["minibatch_size"]
 
     # compute GAE advantages and returns before we start updating
-    # we need the value of the last state to bootstrap the advantage calculation
+    # we need the value of the next state (s_{T+1}) to bootstrap
     device = next(agent.parameters()).device
-    last_obs = buffer.observations[-1]
+    # use the observation *after* the last action (s_{T+1}) for GAE
+    # bootstrapping — buffer.observations[-1] is s_T (before the last
+    # action), so the caller passes the correct next-state instead.
+    if last_obs is None:
+        last_obs = buffer.observations[-1]
     with torch.no_grad():
         last_value = agent.critic(
             torch.tensor(last_obs, dtype=torch.float32, device=device)

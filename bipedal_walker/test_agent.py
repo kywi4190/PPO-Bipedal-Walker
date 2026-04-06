@@ -3,7 +3,7 @@ import numpy as np
 from agent import ActorCritic, RolloutBuffer
 
 # Define sizes
-obs_size, act_size = 13, 4
+obs_size, act_size = 19, 6
 
 # Initialize agent
 agent = ActorCritic(obs_size, act_size, hidden_size=64)

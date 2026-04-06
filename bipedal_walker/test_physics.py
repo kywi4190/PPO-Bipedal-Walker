@@ -7,7 +7,7 @@ world = PhysicsWorld(CONFIG)
 state = world.reset()
 print(f"State shape: {state.shape}")
 
-actions = np.zeros(4)
+actions = np.zeros(6)
 new_state = world.step(actions)
 
 print(f"New state shape: {new_state.shape}")

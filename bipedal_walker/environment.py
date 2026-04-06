@@ -10,7 +10,6 @@ algorithms expect.
 No actual gym dependency -- we just follow the same interface pattern.
 """
 
-import math
 import numpy as np
 
 from config import CONFIG
@@ -21,18 +20,18 @@ class BipedalWalkerEnv:
     """
     Wraps PhysicsWorld to give a standard RL environment interface.
 
-    Observation: 13 floats from the ragdoll's state vector
-    Action:      4 floats in [-1, 1], one per joint motor
+    Observation: 19 floats from the ragdoll's state vector
+    Action:      6 floats in [-1, 1], one per joint motor
     """
 
     def __init__(self, config=CONFIG):
         self.config = config
         self.world = PhysicsWorld(config)
 
-        # observation is 13 floats (see physics.py RagdollBody.get_state)
-        self.observation_size = 13
-        # 4 motors: left_hip, right_hip, left_knee, right_knee
-        self.action_size = 4
+        # observation is 19 floats (see physics.py RagdollBody.get_state)
+        self.observation_size = 19
+        # 6 motors: left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle
+        self.action_size = 6
 
         # episode tracking
         self.step_count = 0
@@ -53,10 +52,10 @@ class BipedalWalkerEnv:
         Take one step in the environment.
 
         Args:
-            action: numpy array of 4 floats, will be clipped to [-1, 1]
+            action: numpy array of 6 floats, will be clipped to [-1, 1]
 
         Returns:
-            obs:    numpy array of 13 floats (new state)
+            obs:    numpy array of 19 floats (new state)
             reward: float (total reward for this step)
             done:   bool (episode over?)
             info:   dict with debugging goodies
@@ -73,38 +72,43 @@ class BipedalWalkerEnv:
         fallen = self.world.ragdoll.is_fallen()
 
         # ── reward computation ───────────────────────────────────────
-        # each component is tracked separately so we can debug what the
-        # agent is actually optimizing for
+        # 4 components: forward velocity, alive bonus, energy penalty, fall penalty.
+        # no explicit uprightness reward — balance emerges from foot contacts
+        # and the devastating fall penalty.
 
-        # primary signal: move to the right.  delta-x since last step
-        # times the scale factor.  positive = good, negative = bad.
+        # forward velocity (pixels per physics step)
+        forward_velocity = torso_x - self.prev_torso_x
+
+        # superlinear velocity scaling: v * (1 + bonus * |v|)
+        # makes running more rewarding than walking — doubling speed
+        # more than doubles the reward.
+        vbs = self.config["velocity_bonus_scale"]
+        scaled_velocity = forward_velocity * (
+            1.0 + vbs * abs(forward_velocity)
+        )
+
         forward_reward = (
-            (torso_x - self.prev_torso_x) * self.config["forward_reward_scale"]
+            scaled_velocity * self.config["forward_reward_scale"]
         )
 
-        # small cookie for staying alive -- adds up over long episodes
-        # and gives a baseline incentive to not just faceplant immediately
-        alive_bonus = self.config["alive_bonus"]
-
-        # reward for keeping the torso upright.  cos(0) = 1.0 (perfect),
-        # cos(60°) ≈ 0.5, cos(90°) = 0 (horizontal).  smooth gradient
-        # that nudges the agent toward vertical without being too harsh.
-        upright_reward = (
-            self.config["upright_reward_scale"] * math.cos(torso_angle)
+        # compounding survival bonus: later steps worth more.
+        # step 0 -> 1.0x, step 999 -> ~2.0x.  full-episode total: ~1500.
+        # makes the last 500 steps worth more than the first 500.
+        max_steps = self.config["max_episode_steps"]
+        alive_bonus = self.config["alive_bonus"] * (
+            1.0 + self.step_count / max_steps
         )
 
-        # penalize large actions to discourage spastic flailing.
-        # sum of squared actions keeps it smooth and differentiable.
+        # energy penalty
         energy_penalty = (
             -self.config["energy_penalty_scale"] * float(np.sum(action ** 2))
         )
 
-        # big negative reward for falling -- this is the "don't do that" signal
+        # fall penalty
         fall_penalty = self.config["fall_penalty"] if fallen else 0.0
 
         total_reward = (
-            forward_reward + alive_bonus + upright_reward
-            + energy_penalty + fall_penalty
+            forward_reward + alive_bonus + energy_penalty + fall_penalty
         )
 
         # ── episode termination ──────────────────────────────────────
@@ -117,11 +121,12 @@ class BipedalWalkerEnv:
         # ── info dict for debugging / logging ────────────────────────
         info = {
             "torso_x": torso_x,
+            "torso_angle": torso_angle,
+            "fell": fallen,
             "episode_steps": self.step_count,
             "reward_breakdown": {
                 "forward_reward": forward_reward,
                 "alive_bonus": alive_bonus,
-                "upright_reward": upright_reward,
                 "energy_penalty": energy_penalty,
                 "fall_penalty": fall_penalty,
             },
