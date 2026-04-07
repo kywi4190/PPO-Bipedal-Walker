@@ -339,13 +339,33 @@ class RagdollBody:
         The old 5px margin caused false positives: when feet support the
         body, shin-bottom vertices sit ~10px above ground, but joint flex
         under load could push them into the 5px zone.
+
+        Shins are checked only over their upper 80% (knee side).  The
+        bottom 20% near the ankle joint is excluded so that minor clipping
+        at the ankle doesn't end the episode — the intent is to penalise
+        knees and torso hitting the ground, not the ankle region.
         """
         fall_y = self.config["ground_y"] - 2
-        for name in ("torso", "left_thigh", "right_thigh", "left_shin", "right_shin"):
+
+        # torso and thighs: all vertices count
+        for name in ("torso", "left_thigh", "right_thigh"):
             body = self.bodies[name]
             for v in self.shapes[name].get_vertices():
                 if body.local_to_world(v).y >= fall_y:
                     return True
+
+        # shins: skip the bottom 20% (local y > 0.3 * lower_leg_length,
+        # i.e. the ankle-end quarter of the shin box).
+        ll = self.config["lower_leg_length"]
+        shin_check_limit = ll * 0.3   # == ll/2 - 0.2*ll
+        for name in ("left_shin", "right_shin"):
+            body = self.bodies[name]
+            for v in self.shapes[name].get_vertices():
+                if v.y > shin_check_limit:   # ankle-end — skip
+                    continue
+                if body.local_to_world(v).y >= fall_y:
+                    return True
+
         return False
 
     def get_torso_x(self):
