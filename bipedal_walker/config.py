@@ -85,10 +85,11 @@ CONFIG = {
 
     "forward_reward_scale": 5.0,   # velocity reward scale
     "velocity_bonus_scale": 1.0,   # superlinear speed bonus: v*(1+1.0*|v|)
-    "alive_bonus": 1.0,            # per-step survival bonus, compounds over episode
-                                   # (full-episode total: ~1500)
+    "alive_bonus": 2.0,            # per-step survival bonus, compounds over episode
+                                   # (full-episode total: ~3000)
     "energy_penalty_scale": 0.1,   # penalizes motor vibration; max ~400/episode
-    "fall_penalty": -500.0,        # ~1/3 of full-episode alive bonus
+    "fall_penalty": -5000.0,       # ~1.7x full-episode alive bonus — must dominate
+                                   # short-episode forward reward to punish diving
 
     # ── logging / saving (profile-dependent) ─────────────────────────
     "log_interval": 5,             # short: every 5 updates
@@ -117,7 +118,7 @@ CONFIG = {
 #  rollout_steps   | 2048   | 4096   | 8192   | 8192   | 8192
 #  minibatch_size  | 64     | 128    | 256    | 256    | 256
 #  ppo_epochs      | 10     | 8      | 6      | 5      | 5
-#  entropy_coef    | 0.01   | 0.005  | 0.003  | 0.003  | 0.003
+#  entropy_coef    | 0.01   | 0.005  | 0.005  | 0.01   | 0.01
 #  log_interval    | 5      | 10     | 10     | 25     | 50
 #  ~wall clock     | 15 min | 2.3 hr | 7.6 hr | 19 hr  | 38 hr
 
@@ -139,7 +140,7 @@ PROFILES = {
         "rollout_steps": 8192,
         "minibatch_size": 256,
         "ppo_epochs": 6,
-        "entropy_coef": 0.003,
+        "entropy_coef": 0.005,
         "log_interval": 10,
         "save_path": "checkpoints/ppo_bipedal_long.pt",
     },
@@ -149,7 +150,7 @@ PROFILES = {
         "rollout_steps": 8192,
         "minibatch_size": 256,
         "ppo_epochs": 5,
-        "entropy_coef": 0.003,
+        "entropy_coef": 0.01,
         "log_interval": 25,
         "save_path": "checkpoints/ppo_bipedal_xlong.pt",
     },
@@ -159,7 +160,7 @@ PROFILES = {
         "rollout_steps": 8192,
         "minibatch_size": 256,
         "ppo_epochs": 5,
-        "entropy_coef": 0.003,
+        "entropy_coef": 0.01,
         "log_interval": 50,
         "save_path": "checkpoints/ppo_bipedal_max.pt",
     },
