@@ -5,11 +5,9 @@ This is the file that actually runs training. It wires together the environment,
 the actor-critic network, and the PPO update function into one big loop:
 collect experience -> update the policy -> log stats -> repeat.
 
-Run this directly to start training:
-    python train.py
+Run this directly to start training: python train.py
 
-Hit Ctrl+C at any time to stop early -- it'll save the model before exiting
-so you don't lose all that sweet training progress.
+Ctrl+C at any time to stop early: it will checkpoint the model before exiting
 """
 
 import math
@@ -28,40 +26,37 @@ def train(config):
     """
     The main training loop. Sets up the env + agent, then alternates between
     collecting rollouts and running PPO updates until we've used up the
-    training budget (or the user hits Ctrl+C).
+    training budget (or the user exits).
     """
 
-    # ══════════════════════════════════════════════════════════════════════
+    # ______________________________________________________________________
     #  SETUP
     #  Create the environment, neural network, optimizer, and all the
     #  bookkeeping variables we need to track training progress.
-    # ══════════════════════════════════════════════════════════════════════
+    # ______________________________________________________________________
 
     # the environment wraps the physics sim + reward computation
     env = BipedalWalkerEnv(config)
 
-    # check if we have a GPU -- probably not on most laptops but hey,
-    # maybe you're running this on a lab machine with a beefy card
+    # check if we have a GPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # build the actor-critic network (the walker's brain) and put it
-    # on the right device
+    # build the actor-critic network and put it on the right device
     agent = ActorCritic(
         env.observation_size,
         env.action_size,
         hidden_size=config["hidden_size"],
     ).to(device)
 
-    # Adam optimizer -- the standard go-to for deep RL.  It adapts the
-    # learning rate per-parameter which helps when actor and critic
-    # gradients have very different magnitudes.
+    # Adam optimizer (standard for deep RL)
+    # It adapts the learning rate per-parameter which helps when actor and critic
+    # gradients have very different magnitudes
     optimizer = torch.optim.Adam(agent.parameters(), lr=config["learning_rate"])
 
-    # the rollout buffer stores transitions while we collect experience,
-    # then we dump the whole thing into PPO for the update
+    # the rollout buffer stores transitions while we collect experience
     buffer = RolloutBuffer()
 
-    # ── tracking variables ────────────────────────────────────────────
+    # TRACKING VARIABLES:
     # these let us monitor training progress and decide when to save
     total_timesteps = 0                    # total env steps so far
     episode_count = 0                      # completed episodes
@@ -75,7 +70,7 @@ def train(config):
     current_ep_reward = 0.0
     current_ep_length = 0
 
-    # ── diagnostic tracking (for reward analysis) ──────────────
+    # DIAGNOSTIC TRACKING (for reward analysis):
     diag_ep_breakdowns = []    # per-episode reward component sums
     diag_ep_distances = []     # torso_x at end - start_x
     diag_ep_falls = []         # True if episode ended in fall
@@ -85,14 +80,14 @@ def train(config):
     current_ep_action_mag_sum = 0.0
     current_ep_action_steps = 0
 
-    # ── snapshot tracking (for end-of-training summary) ────────────
+    # snapshot tracking (for end-of-training summary):
     # capture diagnostics at 5 evenly-spaced moments across training
     n_snapshots = 10 if config["total_timesteps"] >= 10_000_000 else 5
     snapshot_interval = config["total_timesteps"] // n_snapshots
     next_snapshot_at = snapshot_interval
     training_snapshots = []
 
-    # ── startup banner ────────────────────────────────────────────────
+    # startup banner:
     # print out all the key hyperparameters so we know exactly what
     # configuration we're training with (super handy when comparing runs)
     print("=" * 60)
@@ -118,7 +113,7 @@ def train(config):
     print(f"  Save path:           {config['save_path']}")
     print("=" * 60)
 
-    # ── reward sanity check ─────────────────────────────────────────
+    # reward sanity check:
     ms = config["max_episode_steps"]
     _ab = config["alive_bonus"]
     _frs = config["forward_reward_scale"]
@@ -153,7 +148,7 @@ def train(config):
 
     # ══════════════════════════════════════════════════════════════════════
     #  MAIN TRAINING LOOP
-    #  This is where the magic happens. We repeat:
+    #  This is where training happens. We repeat:
     #    1) collect a rollout (run the policy in the env)
     #    2) update the policy with PPO
     #    3) log stats and save if we've improved
@@ -178,8 +173,8 @@ def train(config):
                     obs, dtype=torch.float32, device=device
                 )
 
-                # ask the policy what to do -- no_grad because we're just
-                # collecting data here, not computing gradients
+                # ask the policy what to do
+                # no_grad because we're just collecting data here
                 with torch.inference_mode():
                     action, log_prob, value = agent.get_action(obs_tensor)
 
@@ -189,7 +184,7 @@ def train(config):
                 # take a step in the environment and see what happens
                 next_obs, reward, done, info = env.step(action_np)
 
-                # stash this transition in the buffer for PPO to chew on later
+                # stash this transition in the buffer for PPO to use later
                 buffer.add(
                     obs=obs,
                     action=action_np,
@@ -199,7 +194,7 @@ def train(config):
                     value=value.cpu().item(),
                 )
 
-                # keep a running tally of the current episode's reward and length
+                # keep a running count of the current episode's reward and length
                 current_ep_reward += reward
                 current_ep_length += 1
                 total_timesteps += 1
@@ -215,7 +210,7 @@ def train(config):
                 current_ep_action_steps += 1
 
                 if done:
-                    # episode finished! record the final stats
+                    # episode finished: record the final stats
                     episode_rewards.append(current_ep_reward)
                     episode_lengths.append(current_ep_length)
                     episode_count += 1
@@ -259,8 +254,8 @@ def train(config):
             # correct next-state value, not the last stored observation
             update_stats = ppo_update(agent, optimizer, buffer, config, last_obs=obs)
 
-            # done with this batch of data -- clear the buffer for the
-            # next rollout
+            # done with this batch of data
+            # clear the buffer for the next rollout
             buffer.clear()
             update_count += 1
 

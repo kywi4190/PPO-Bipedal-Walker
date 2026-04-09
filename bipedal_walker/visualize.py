@@ -17,6 +17,7 @@ Controls:
 """
 
 import argparse
+import math
 
 import numpy as np
 import pygame
@@ -28,19 +29,65 @@ from agent import ActorCritic
 
 
 # ── colors ──────────────────────────────────────────────────────────────
-SKY_COLOR = (135, 206, 235)         # sky blue
-GROUND_COLOR = (86, 125, 70)        # earthy green
-GROUND_LINE_COLOR = (60, 90, 50)    # darker edge on top
-GRID_COLOR = (70, 110, 60)          # tick marks
+SKY_COLOR = (135, 206, 255)         # sky blue
+GROUND_COLOR = (60, 60, 60)
+GROUND_LINE_COLOR = (40, 40, 40)    # darker edge on top
+GRID_COLOR = (250, 190, 25)          # tick marks
 
-TORSO_COLOR = (70, 100, 160)        # muted blue
-THIGH_COLOR = (90, 130, 180)        # slightly lighter
-SHIN_COLOR = (110, 150, 200)        # lighter still
-FOOT_COLOR = (130, 170, 220)        # lightest blue (lighter than shin)
-JOINT_COLOR = (220, 200, 60)        # yellow-ish dots
+TORSO_COLOR = (190, 190, 190)
+THIGH_COLOR = (230, 230, 230)
+SHIN_COLOR = (230, 230, 230)
+FOOT_COLOR = (190, 190, 190)
+JOINT_COLOR = (20, 20, 20)
 
 HUD_BG_COLOR = (0, 0, 0, 140)      # semi-transparent black
 HUD_TEXT_COLOR = (255, 255, 255)
+
+MOUNTAIN_COLOR = (70, 120, 90)
+PARALLAX_SPEED = 0.1              # mountains scroll at this fraction of ground speed
+
+
+# ── mountains (perlin noise background) ──────────────────────────────
+
+def _perlin_hash(i, seed=0):
+    """Pseudo-random gradient at integer position."""
+    h = ((i * 127 + seed * 311) ^ 0xB5297A4D) & 0xFFFFFFFF
+    h = (((h >> 13) ^ h) * 0x68E31DA4) & 0xFFFFFFFF
+    return (h & 0xFFFF) / 32768.0 - 1.0
+
+
+def _perlin_1d(x, seed=0):
+    """1D Perlin noise returning a value in roughly [-0.5, 0.5]."""
+    x0 = int(math.floor(x))
+    t = x - x0
+    t = t * t * t * (t * (t * 6 - 15) + 10)  # quintic smoothstep
+    d0 = _perlin_hash(x0, seed) * (x - x0)
+    d1 = _perlin_hash(x0 + 1, seed) * (x - x0 - 1)
+    return d0 + t * (d1 - d0)
+
+
+def _mountain_height(wx):
+    """Fractal Perlin noise for the mountain profile. Returns ~[-1, 1]."""
+    total = 0.0
+    amp, freq = 1.0, 0.002
+    for octave in range(4):
+        total += _perlin_1d(wx * freq, seed=octave) * amp
+        amp *= 0.5
+        freq *= 2.0
+    return total
+
+
+def draw_mountains(screen, camera_x, screen_w, ground_y):
+    """Draw a parallax mountain silhouette between the horizon and the ground."""
+    offset = camera_x * PARALLAX_SPEED
+    points = []
+    for sx in range(0, screen_w + 1, 2):
+        wx = sx + offset - screen_w // 2
+        my = ground_y - 100 - _mountain_height(wx) * 50
+        points.append((sx, int(my)))
+    points.append((screen_w, int(ground_y)))
+    points.append((0, int(ground_y)))
+    pygame.draw.polygon(screen, MOUNTAIN_COLOR, points)
 
 
 # ── rendering helpers ───────────────────────────────────────────────────
@@ -85,7 +132,7 @@ def draw_body_parts(screen, body_positions, camera_x, screen_w):
             for vx, vy in body_positions[name]["vertices"]
         ]
         pygame.draw.polygon(screen, colors[name], verts)
-        pygame.draw.polygon(screen, (40, 40, 40), verts, 2)  # outline
+        pygame.draw.aalines(screen, (40, 40, 40), True, verts)
 
     # joint circles at the top edge of each limb segment.
     # in the box vertex order [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)],
@@ -278,6 +325,7 @@ def run_visualization(model_path=None):
 
         # ── draw everything ────────────────────────────────────────
         screen.fill(SKY_COLOR)
+        draw_mountains(screen, camera_x, screen_w, CONFIG["ground_y"])
         draw_ground(
             screen, camera_x, screen_w, screen_h,
             CONFIG["ground_y"], small_font,
