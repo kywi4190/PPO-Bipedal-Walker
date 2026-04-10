@@ -394,11 +394,12 @@ class PhysicsWorld:
 
         # flat ground stretching way out in both directions so the walker
         # never runs off the edge.  radius=2 gives it a thin but nonzero
-        # collision thickness.
+        # collision thickness.  bounds are ~1e6 px so long visualization
+        # runs (no step cap) can't walk off the edge in any practical time.
         ground = pymunk.Segment(
             self.space.static_body,
-            (-10000, config["ground_y"]),
-            (10000, config["ground_y"]),
+            (-1_000_000, config["ground_y"]),
+            (1_000_000, config["ground_y"]),
             radius=2.0,
         )
         ground.friction = 1.0

@@ -10,14 +10,22 @@ Usage:
     # with a trained model
     python visualize.py --model checkpoints/ppo_bipedal.pt
 
+    # start in fullscreen
+    python visualize.py --fullscreen
+
 Controls:
     ESC / close window  - quit
     SPACE               - pause / unpause
     R                   - reset episode
+    F11                 - toggle fullscreen
+    0                   - switch to random actions (no model)
+    1-5                 - switch to short / medium / long / xlong / max model
+                          (ignored if the checkpoint file doesn't exist)
 """
 
 import argparse
 import math
+import os
 
 import numpy as np
 import pygame
@@ -185,13 +193,13 @@ def draw_ground(screen, camera_x, screen_w, screen_h, ground_y, small_font):
 
 
 def draw_hud(screen, font, episode_reward, step_count, torso_x,
-             using_model, paused):
+             mode_label, paused):
     """Heads-up display in the top-left corner."""
     lines = [
         f"Reward: {episode_reward:.1f}",
         f"Steps: {step_count}",
         f"Pos X: {torso_x:.0f}",
-        f"Mode: {'trained model' if using_model else 'random actions'}",
+        f"Mode: {mode_label}",
     ]
     if paused:
         lines.append("** PAUSED **")
@@ -211,15 +219,57 @@ def draw_hud(screen, font, episode_reward, step_count, torso_x,
         screen.blit(text, (10 + pad, 10 + pad + i * line_h))
 
 
+# ── model switching ────────────────────────────────────────────────────
+# number keys 0-5 map to random / short / medium / long / xlong / max.
+# profile=None means "no model -- use random actions".
+PROFILE_KEYS = {
+    pygame.K_0: None,
+    pygame.K_1: "short",
+    pygame.K_2: "medium",
+    pygame.K_3: "long",
+    pygame.K_4: "xlong",
+    pygame.K_5: "max",
+}
+
+
+def _profile_path(profile):
+    """Checkpoint path for a given training profile name."""
+    return f"checkpoints/ppo_bipedal_{profile}.pt"
+
+
+def _load_agent(model_path, env, device):
+    """Load an ActorCritic from a checkpoint file. Returns (agent, hidden_size)."""
+    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        hidden_size = checkpoint["hidden_size"]
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        # backward compat: old checkpoints are bare state_dicts
+        hidden_size = CONFIG["hidden_size"]
+        state_dict = checkpoint
+    agent = ActorCritic(
+        env.observation_size, env.action_size,
+        hidden_size=hidden_size,
+    ).to(device)
+    agent.load_state_dict(state_dict)
+    agent.eval()
+    return agent, hidden_size
+
+
 # ── main visualization loop ────────────────────────────────────────────
 
-def run_visualization(model_path=None):
+def run_visualization(model_path=None, fullscreen=False):
     """Set up pygame + environment and run the render loop."""
     pygame.init()
 
     screen_w = CONFIG["viewport_width"]
     screen_h = CONFIG["viewport_height"]
-    screen = pygame.display.set_mode((screen_w, screen_h))
+    # SCALED keeps the logical draw surface at viewport_width x viewport_height
+    # and GPU-scales it to the window/monitor while preserving aspect ratio
+    # (letterboxed). This lets fullscreen work without touching world coords,
+    # ground_y, HUD positioning, or any of the drawing code.
+    flags = pygame.SCALED | (pygame.FULLSCREEN if fullscreen else 0)
+    screen = pygame.display.set_mode((screen_w, screen_h), flags)
     pygame.display.set_caption(
         "Bipedal Walker" + (" (trained)" if model_path else " (random)")
     )
@@ -232,26 +282,19 @@ def run_visualization(model_path=None):
     env = BipedalWalkerEnv(CONFIG)
 
     # optionally load a trained model
-    using_model = False
     agent = None
+    mode_label = "random"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if model_path:
-        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            hidden_size = checkpoint["hidden_size"]
-            state_dict = checkpoint["model_state_dict"]
-        else:
-            # backward compat: old checkpoints are bare state_dicts
-            hidden_size = CONFIG["hidden_size"]
-            state_dict = checkpoint
-        agent = ActorCritic(
-            env.observation_size, env.action_size,
-            hidden_size=hidden_size,
-        ).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        using_model = True
+        agent, hidden_size = _load_agent(model_path, env, device)
+        # label by profile name if the path matches a known profile,
+        # otherwise fall back to the checkpoint filename stem
+        mode_label = next(
+            (p for p in PROFILE_KEYS.values()
+             if p is not None and _profile_path(p) == model_path),
+            os.path.splitext(os.path.basename(model_path))[0],
+        )
         print(f"Loaded model from: {model_path} (hidden_size={hidden_size})")
     else:
         print("No model specified -- using random actions")
@@ -267,7 +310,10 @@ def run_visualization(model_path=None):
     paused = False
     running = True
 
-    print("Controls: ESC=quit, SPACE=pause, R=reset")
+    print(
+        "Controls: ESC=quit, SPACE=pause, R=reset, F11=toggle fullscreen, "
+        "0=random, 1-5=short/medium/long/xlong/max"
+    )
 
     while running:
         # ── events ─────────────────────────────────────────────────
@@ -285,11 +331,35 @@ def run_visualization(model_path=None):
                     step_count = 0
                     camera_x = CONFIG["torso_start_x"]
                     print("Episode reset (manual)")
+                elif event.key == pygame.K_F11:
+                    pygame.display.toggle_fullscreen()
+                elif event.key in PROFILE_KEYS:
+                    profile = PROFILE_KEYS[event.key]
+                    if profile is None:
+                        agent = None
+                        mode_label = "random"
+                        print("Switched to random actions")
+                    else:
+                        path = _profile_path(profile)
+                        if not os.path.exists(path):
+                            print(
+                                f"Cannot switch to '{profile}': "
+                                f"{path} not found"
+                            )
+                        else:
+                            agent, hidden_size = _load_agent(
+                                path, env, device,
+                            )
+                            mode_label = profile
+                            print(
+                                f"Switched to '{profile}' model "
+                                f"(hidden_size={hidden_size})"
+                            )
 
         # ── simulation step (skip when paused) ─────────────────────
         if not paused:
             # pick an action
-            if using_model:
+            if agent is not None:
                 obs_t = torch.tensor(obs, dtype=torch.float32, device=device)
                 with torch.no_grad():
                     action, _, _ = agent.get_action(obs_t)
@@ -303,7 +373,11 @@ def run_visualization(model_path=None):
             episode_reward += reward
             step_count += 1
 
-            if done:
+            # only reset on actual falls -- ignore the env's step-count cap
+            # so the walker can keep going indefinitely during visualization.
+            # (the env still emits done at max_episode_steps, but we don't
+            # care here; press R to reset manually if you want.)
+            if info["fell"]:
                 torso_x = info["torso_x"]
                 distance = torso_x - CONFIG["torso_start_x"]
                 print(
@@ -333,7 +407,7 @@ def run_visualization(model_path=None):
         draw_body_parts(screen, body_pos, camera_x, screen_w)
         draw_hud(
             screen, font, episode_reward, step_count,
-            body_pos["torso"]["position"][0], using_model, paused,
+            body_pos["torso"]["position"][0], mode_label, paused,
         )
 
         pygame.display.flip()
@@ -353,5 +427,9 @@ if __name__ == "__main__":
         "--model", type=str, default=None,
         help="path to a trained model checkpoint (e.g. checkpoints/ppo_bipedal.pt)",
     )
+    parser.add_argument(
+        "--fullscreen", action="store_true",
+        help="start in fullscreen mode (toggle with F11)",
+    )
     args = parser.parse_args()
-    run_visualization(model_path=args.model)
+    run_visualization(model_path=args.model, fullscreen=args.fullscreen)
